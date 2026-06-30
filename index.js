@@ -401,48 +401,76 @@ async function handleScamalyticsLookup(request, config) {
   const ipToLookup = url.searchParams.get("ip");
   if (!ipToLookup) return new Response(JSON.stringify({ error: "Missing IP" }), { status: 400, headers: { "Content-Type": "application/json" } });
 
-  const cf = request.cf || {};
   const headers = new Headers({ "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
 
-  const isp = cf.asOrganization || "Unknown ISP";
-  const city = cf.city || "Unknown City";
-  const countryCode = cf.country || "US";
+  try {
+    const ipRes = await safeFetch(`http://ip-api.com/json/${ipToLookup}?fields=status,country,countryCode,city,isp,hosting`);
+    if (!ipRes.ok) throw new Error("IP lookup failed");
+    
+    const ipData = await ipRes.json();
+    if (ipData.status !== "success") throw new Error("IP data unsuccessful");
 
-  const dcKeywords = [
-    "hosting", "datacenter", "server", "cloud", "hetzner", "digitalocean", 
-    "ovh", "linode", "amazon", "aws", "google", "microsoft", "azure", 
-    "leaseweb", "vultr", "contabo", "datacamp", "choopa", "m276", "fastly",
-    "cloudflare", "zenlayer", "colocation", "quadranet", "i3d", "scaleway",
-    "plusserver", "interserver", "liquidweb", "arvancloud", "derak"
-  ];
+    const isp = ipData.isp || "Unknown ISP";
+    const city = ipData.city || "Unknown City";
+    const countryCode = ipData.countryCode || "US";
+    
+    const dcKeywords = [
+      "hosting", "datacenter", "server", "cloud", "hetzner", "digitalocean", 
+      "ovh", "linode", "amazon", "aws", "google", "microsoft", "azure", 
+      "leaseweb", "vultr", "contabo", "datacamp", "choopa", "fastly",
+      "cloudflare", "zenlayer", "colocation", "quadranet", "i3d", "scaleway",
+      "arvancloud", "derak"
+    ];
+    const ispLower = isp.toLowerCase();
+    const isDatacenter = ipData.hosting || dcKeywords.some(keyword => ispLower.includes(keyword));
 
-  const ispLower = isp.toLowerCase();
-  const isDatacenter = dcKeywords.some(keyword => ispLower.includes(keyword));
+    const ipHash = ipToLookup.split('.').reduce((acc, byte) => acc + parseInt(byte || 0, 10), 0) % 20;
+    
+    let score = 0;
+    let risk = "low";
 
-  const score = isDatacenter ? 100 : 0;
-  const risk = isDatacenter ? "very high" : "low";
-
-  const emulatedResponse = {
-    scamalytics: {
-      status: "ok",
-      ip: ipToLookup,
-      scamalytics_isp: isp,
-      scamalytics_score: score,
-      scamalytics_risk: risk
-    },
-    external_datasources: {
-      ipinfo: {
-        as_name: isp,
-        ip_country_name: countryCode,
-        ip_country_code: countryCode
-      },
-      maxmind_geolite2: {
-        ip_city: city
-      }
+    if (isDatacenter) {
+      score = 65 + ipHash; 
+      risk = score > 75 ? "very high" : "high";
+    } else {
+      score = 5 + (ipHash % 15); 
+      risk = "low";
     }
-  };
 
-  return new Response(JSON.stringify(emulatedResponse), { headers });
+    const emulatedResponse = {
+      scamalytics: {
+        status: "ok",
+        ip: ipToLookup,
+        scamalytics_isp: isp,
+        scamalytics_score: score,
+        scamalytics_risk: risk
+      },
+      external_datasources: {
+        ipinfo: {
+          as_name: isp,
+          ip_country_name: countryCode,
+          ip_country_code: countryCode
+        },
+        maxmind_geolite2: {
+          ip_city: city
+        }
+      }
+    };
+
+    return new Response(JSON.stringify(emulatedResponse), { headers });
+  } catch (error) {
+    const fallbackResponse = {
+      scamalytics: {
+        status: "ok",
+        ip: ipToLookup,
+        scamalytics_isp: "Unknown ISP",
+        scamalytics_score: 15,
+        scamalytics_risk: "low"
+      },
+      external_datasources: {}
+    };
+    return new Response(JSON.stringify(fallbackResponse), { headers });
+  }
 }
 
 async function handleConfigPage(userID, hostName, proxyAddress) {
